@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-YT Clone - POC with optional Vector DB
+YT Clone - POC with TF-IDF Vector Search
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Minimum:  pip install yt-dlp
-+ Vector: pip install chromadb  (auto-detected, falls back to keyword search)
++ Search: pip install scikit-learn  (TF-IDF, works on Python 3.14+)
 + AI:     pip install ollama  (then: ollama pull llama3.2)
 
 Usage:
@@ -73,39 +73,51 @@ def vtt_to_text(path):
     return " ".join(lines)
 
 
-# ─── Vector DB (optional ChromaDB) ───────────────────────────────────────────
+# ─── TF-IDF Vector Search (scikit-learn, works on Python 3.14+) ──────────────
 
-def build_vector_index(docs):
-    """Build ChromaDB index. Returns collection or None if unavailable."""
+def build_tfidf_index(docs):
+    """Chunk docs + build TF-IDF matrix. Returns (chunks, vectorizer, matrix) or None."""
     try:
-        import chromadb
-        from chromadb.utils import embedding_functions
+        from sklearn.feature_extraction.text import TfidfVectorizer
     except ImportError:
         return None
 
-    print("\n🗄️  Building vector index (ChromaDB)...")
-    client = chromadb.Client()
-    ef = embedding_functions.DefaultEmbeddingFunction()
-    col = client.get_or_create_collection("yt_clone", embedding_function=ef)
+    print("\n🗄️  Building TF-IDF index (scikit-learn)...")
+    chunks = []
+    for title, text in docs:
+        # Slide window: 400-char chunks, 100-char overlap for context continuity
+        step = 300
+        for i in range(0, max(1, len(text) - 100), step):
+            chunk = text[i:i + 400]
+            if len(chunk.strip()) > 50:
+                chunks.append({"title": title, "text": chunk})
 
-    for i, (title, text) in enumerate(docs):
-        # Split long transcripts into chunks
-        chunks = [text[j:j+800] for j in range(0, len(text), 600)]
-        col.add(
-            documents=chunks,
-            ids=[f"doc_{i}_chunk_{k}" for k in range(len(chunks))],
-            metadatas=[{"title": title} for _ in chunks]
-        )
-    print(f"  ✓ Indexed {len(docs)} video(s) into vector DB")
-    return col
+    vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=20000)
+    matrix = vectorizer.fit_transform([c["text"] for c in chunks])
+    print(f"  ✓ Indexed {len(chunks)} chunks from {len(docs)} video(s)")
+    return chunks, vectorizer, matrix
 
 
-def vector_search(col, query, top_k=3):
-    results = col.query(query_texts=[query], n_results=top_k)
-    output = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        output.append((meta["title"], doc))
-    return output
+def tfidf_search(index, query, top_k=3):
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as np
+    chunks, vectorizer, matrix = index
+    q_vec = vectorizer.transform([query])
+    scores = cosine_similarity(q_vec, matrix)[0]
+    top_idx = np.argsort(scores)[::-1]
+    seen_titles, results = set(), []
+    for i in top_idx:
+        if scores[i] < 0.01:
+            break
+        c = chunks[i]
+        # Deduplicate: only 1 chunk per video unless very different score
+        key = (c["title"], round(scores[i], 1))
+        if key not in seen_titles:
+            seen_titles.add(key)
+            results.append((c["title"], c["text"]))
+        if len(results) >= top_k:
+            break
+    return results
 
 
 # ─── Ticker Extractor ────────────────────────────────────────────────────────
@@ -167,12 +179,12 @@ def main():
 
     print(f"\n✅ Loaded {len(docs)} video(s)")
 
-    # Vector DB (optional)
-    collection = build_vector_index(docs)
-    if collection:
-        print("  ✓ Vector search active")
+    # TF-IDF index (optional, needs scikit-learn)
+    tfidf = build_tfidf_index(docs)
+    if tfidf:
+        print("  ✓ TF-IDF vector search active")
     else:
-        print("  ℹ️  Keyword search  (pip install chromadb for vector search)")
+        print("  ℹ️  Keyword search  (pip install scikit-learn for better search)")
 
     # AI (optional)
     try:
@@ -204,8 +216,8 @@ def main():
                 print()
                 continue
 
-            if collection:
-                results = vector_search(collection, q)
+            if tfidf:
+                results = tfidf_search(tfidf, q)
             else:
                 results = keyword_search(docs, q)
 
