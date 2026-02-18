@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-YT Clone - Minimal POC
+YT Clone - POC with optional Vector DB
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Install:  pip install yt-dlp
-Optional: pip install ollama  (then: ollama pull llama3.2)
+Minimum:  pip install yt-dlp
++ Vector: pip install chromadb  (auto-detected, falls back to keyword search)
++ AI:     pip install ollama  (then: ollama pull llama3.2)
 
 Usage:
-  python poc.py "https://www.youtube.com/@InvestingSimplified/videos" 14
-  python poc.py "https://www.youtube.com/@mkbhd" 7
+  python3 poc.py "https://www.youtube.com/@NolanGouveia/videos" 30
+  python3 poc.py "https://youtu.be/VIDEO_ID" 14
 
-No OpenAI. No API keys. No vector DB. Works 100% offline.
+No OpenAI. No API keys. Works 100% offline.
 """
 
 import subprocess, sys, os, re
 from datetime import datetime, timedelta
 
 
-def download_transcripts(channel_url, days=14):
+# ─── Transcript Download ─────────────────────────────────────────────────────
+
+def download_transcripts(channel_url, days=30):
     after = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
     os.makedirs("transcripts", exist_ok=True)
 
@@ -27,7 +30,7 @@ def download_transcripts(channel_url, days=14):
         "--sub-langs", "en",
         "--sub-format", "vtt",
         "--dateafter", after,
-        "--playlist-end", "20",
+        "--playlist-end", "30",
         "--quiet", "--no-warnings",
         "-o", "transcripts/%(title)s.%(ext)s",
         channel_url
@@ -40,73 +43,119 @@ def download_transcripts(channel_url, days=14):
             title = f.replace(".en.vtt", "")
             if len(text) > 100:
                 docs.append((title, text))
-                print(f"  ✓ {title[:65]}")
+                print(f"  ✓ {title[:70]}")
 
     return docs
 
 
 def vtt_to_text(path):
-    """Strip VTT timestamps, return clean text"""
+    """Strip ALL VTT markup — clean readable text only"""
     with open(path, encoding="utf-8", errors="ignore") as f:
         content = f.read()
-    lines = []
-    seen = set()
+
+    # Strip inline timestamp tags: <00:00:31.119> <c> </c> and any HTML tags
+    content = re.sub(r'<\d{2}:\d{2}:\d{2}\.\d+>', '', content)
+    content = re.sub(r'</?c>', '', content)
+    content = re.sub(r'<[^>]+>', '', content)
+
+    lines, seen = [], set()
     for line in content.splitlines():
         line = line.strip()
         if not line: continue
-        if re.match(r"^[\d:,\. ]+-->", line): continue   # timestamp
-        if line in ("WEBVTT", "Kind: captions"): continue
+        if re.match(r"^\d{2}:\d{2}.*-->", line): continue  # timestamp line
+        if line in ("WEBVTT", "Kind: captions", "Kind: subtitles"): continue
         if line.startswith(("Language:", "NOTE", "align:", "position:")): continue
-        if re.match(r"^\d+$", line): continue             # cue number
-        # Deduplicate repeated captions
+        if re.match(r"^\d+$", line): continue               # cue number
         if line not in seen:
             seen.add(line)
             lines.append(line)
+
     return " ".join(lines)
 
 
-def search(docs, query, top_k=3):
-    """BM25-style keyword search — no ML required"""
+# ─── Vector DB (optional ChromaDB) ───────────────────────────────────────────
+
+def build_vector_index(docs):
+    """Build ChromaDB index. Returns collection or None if unavailable."""
+    try:
+        import chromadb
+        from chromadb.utils import embedding_functions
+    except ImportError:
+        return None
+
+    print("\n🗄️  Building vector index (ChromaDB)...")
+    client = chromadb.Client()
+    ef = embedding_functions.DefaultEmbeddingFunction()
+    col = client.get_or_create_collection("yt_clone", embedding_function=ef)
+
+    for i, (title, text) in enumerate(docs):
+        # Split long transcripts into chunks
+        chunks = [text[j:j+800] for j in range(0, len(text), 600)]
+        col.add(
+            documents=chunks,
+            ids=[f"doc_{i}_chunk_{k}" for k in range(len(chunks))],
+            metadatas=[{"title": title} for _ in chunks]
+        )
+    print(f"  ✓ Indexed {len(docs)} video(s) into vector DB")
+    return col
+
+
+def vector_search(col, query, top_k=3):
+    results = col.query(query_texts=[query], n_results=top_k)
+    output = []
+    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+        output.append((meta["title"], doc))
+    return output
+
+
+# ─── Fallback Keyword Search ─────────────────────────────────────────────────
+
+def keyword_search(docs, query, top_k=3):
     words = [w.lower() for w in query.split() if len(w) > 2]
     if not words:
         return []
-
     scored = []
     for title, text in docs:
         tl = text.lower()
         score = sum(tl.count(w) for w in words)
         if score > 0:
-            # Find best excerpt around first keyword hit
             pos = next((tl.find(w) for w in words if w in tl), 0)
             start = max(0, pos - 150)
-            excerpt = ("..." if start > 0 else "") + text[start:start + 600] + "..."
+            excerpt = ("..." if start > 0 else "") + text[start:start+600] + "..."
             scored.append((score, title, excerpt))
+    return [(t, e) for _, t, e in sorted(scored, reverse=True)[:top_k]]
 
-    return sorted(scored, reverse=True)[:top_k]
 
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     channel = sys.argv[1] if len(sys.argv) > 1 else input("YouTube channel URL: ").strip()
-    days    = int(sys.argv[2]) if len(sys.argv) > 2 else 14
+    days    = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 
     docs = download_transcripts(channel, days)
-
     if not docs:
-        print("\n❌ No transcripts found. Try a larger date range or check the channel URL.")
+        print("\n❌ No transcripts found. Try more days: python3 poc.py <url> 60")
         return
 
-    print(f"\n✅ Loaded {len(docs)} video(s)\n")
+    print(f"\n✅ Loaded {len(docs)} video(s)")
 
-    # Optional: Ollama for real AI responses
+    # Vector DB (optional)
+    collection = build_vector_index(docs)
+    if collection:
+        print("  ✓ Vector search active")
+    else:
+        print("  ℹ️  Keyword search  (pip install chromadb for vector search)")
+
+    # AI (optional)
     try:
         import ollama
         use_ai = True
-        print("🤖 Ollama detected — AI mode ON  (model: llama3.2)")
+        print("  ✓ Ollama AI active  (llama3.2)")
     except ImportError:
         use_ai = False
-        print("🔍 Search mode — showing raw excerpts  (install Ollama for AI responses)")
+        print("  ℹ️  No AI responses  (install Ollama for chat mode)")
 
-    print("Ask anything. Ctrl+C to quit.\n")
+    print("\nAsk anything about this creator's content. Ctrl+C to quit.")
     print("─" * 60)
 
     while True:
@@ -115,33 +164,35 @@ def main():
             if not q:
                 continue
 
-            results = search(docs, q)
+            if collection:
+                results = vector_search(collection, q)
+            else:
+                results = keyword_search(docs, q)
 
             if not results:
-                print("No relevant content found. Try different keywords.")
+                print("Nothing relevant found.")
                 continue
 
-            context = "\n---\n".join(f"[{t}]\n{e}" for _, t, e in results)
+            context = "\n---\n".join(f"[{t}]\n{e}" for t, e in results)
 
             if use_ai:
                 r = ollama.chat("llama3.2", messages=[{
                     "role": "user",
                     "content": (
-                        f"You are answering as a YouTube creator based ONLY on their video transcripts below.\n"
-                        f"Question: {q}\n\n"
-                        f"Transcripts:\n{context}\n\n"
-                        f"Answer in the creator's voice, citing which video the info came from."
+                        f"You are answering as a YouTube creator based ONLY on their transcripts.\n"
+                        f"Question: {q}\n\nTranscripts:\n{context}\n\n"
+                        f"Answer concisely, cite which video the info came from."
                     )
                 }])
                 print(f"\n🎙️  {r['message']['content']}")
             else:
-                print(f"\nTop {len(results)} match(es):\n")
-                for i, (score, title, excerpt) in enumerate(results, 1):
+                print(f"\nTop {len(results)} result(s):\n")
+                for i, (title, excerpt) in enumerate(results, 1):
                     print(f"[{i}] {title}")
                     print(f"    {excerpt}\n")
 
         except KeyboardInterrupt:
-            print("\n\n👋 Done!")
+            print("\n👋 Done!")
             break
 
 
