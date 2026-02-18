@@ -1,96 +1,154 @@
-# YouTube Creator Clone
+# YT Clone — Chat with Any YouTube Creator
 
-Create an AI clone of any YouTube creator by feeding their transcripts into a RAG pipeline.
+Turn any YouTube channel into a searchable knowledge base. Ask questions, extract stock picks, find specific topics — all from the creator's actual video transcripts.
+
+**No OpenAI. No API keys. 100% local.**
+
+---
 
 ## What It Does
 
-1. **Downloads transcripts** from any YouTube channel for the last N days
-2. **Builds a searchable knowledge base** using vector embeddings
-3. **Lets you chat** with an AI that answers in the creator's style, using only their actual content
+```
+You: what stocks did he mention?
 
-Perfect for:
-- Cloning stock analysts to extract their strategies
-- Learning from educational creators without watching hours of video
-- Creating interactive "experts" you can query
+[1] The AI Power Bottleneck Just Got Deeper
+    ...here's the seven stocks. First is APLD (Applied Digital Corp).
+    They're the leader in building purpose-built AI and HPC data centers...
 
-## Quick Start
+[2] What happens next week will shape stockmarket for the next DECADE
+    ...Warren AI came up with Cotera Energy and Skyward Specialty Insurance
+    with a 7.4% free cash flow yield and 3.4% dividend...
+```
+
+---
+
+## Quick Start (Mac / Work Laptop)
+
+### Step 1 — Install yt-dlp
+```bash
+brew install pipx && pipx install yt-dlp && pipx ensurepath
+# Open a new terminal after this
+```
+
+### Step 2 — Set up Python environment
+
+**Recommended (Python 3.12 — full semantic search):**
+```bash
+brew install python@3.12
+python3.12 -m venv ~/yt-venv
+source ~/yt-venv/bin/activate
+pip install yt-dlp chromadb
+```
+
+**If you only have Python 3.14+ (TF-IDF search):**
+```bash
+python3 -m venv ~/yt-venv
+source ~/yt-venv/bin/activate
+pip install yt-dlp scikit-learn
+```
+
+### Step 3 — Download the script
+```bash
+curl -O https://raw.githubusercontent.com/bardmyway/yt-clone/main/poc.py
+```
+> ⚠️ If the repo is private, download `poc.py` via GitHub UI: open the file → click **Raw** → Save As
+
+### Step 4 — Run
+```bash
+source ~/yt-venv/bin/activate   # if not already active
+python3 poc.py "https://www.youtube.com/@NolanGouveia/videos" 30
+```
+
+---
+
+## Usage
 
 ```bash
-# 1. Install
+# Any YouTube channel, last N days
+python3 poc.py "https://www.youtube.com/@NolanGouveia/videos" 30
+python3 poc.py "https://www.youtube.com/@mkbhd" 14
+python3 poc.py "https://www.youtube.com/@InvestingSimplified/videos" 60
+
+# Single video
+python3 poc.py "https://youtu.be/VIDEO_ID" 7
+```
+
+### Special Commands (type these at the prompt)
+| Command | What it does |
+|---------|-------------|
+| `tickers` | Extract all stock tickers mentioned across all videos |
+| `stocks` | Same as tickers |
+| Any question | Search transcripts for relevant passages |
+
+---
+
+## Search Quality Tiers
+
+| Setup | Quality | Install |
+|-------|---------|---------|
+| Keyword only | ⭐⭐⭐ | Just `yt-dlp` (zero setup) |
+| TF-IDF | ⭐⭐⭐⭐ | `pip install scikit-learn` |
+| Semantic (ChromaDB) | ⭐⭐⭐⭐⭐ | Python 3.12 + `pip install chromadb` |
+| AI Chat mode | ⭐⭐⭐⭐⭐+ | Above + Ollama (see below) |
+
+**ChromaDB** downloads `all-MiniLM-L6-v2` (~79MB, one-time) and uses real sentence embeddings — it understands that "what stocks did he recommend" and "best equity picks" mean the same thing.
+
+---
+
+## Add AI Responses (Optional)
+
+Install [Ollama](https://ollama.ai), then:
+```bash
+ollama pull llama3.2
+pip install ollama
+```
+Re-run `poc.py` — it auto-detects Ollama and switches to full chat mode where the AI answers in the creator's voice.
+
+---
+
+## Full Pipeline (Advanced / Home Setup)
+
+For persistent vector DB, multi-channel indexing, and production use:
+
+```bash
 pip install -r requirements.txt
 
-# 2. Download transcripts from a channel
-python yt_transcripts.py "https://www.youtube.com/@InvestingSimplified/videos" 30
+# 1. Download transcripts
+python3 yt_transcripts.py "https://www.youtube.com/@NolanGouveia/videos" 90
 
-# 3. Build the vector index
-python build_index.py
+# 2. Build vector index
+python3 build_index.py
 
-# 4. Chat with the clone
-python chat.py
+# 3. Chat
+python3 chat.py
 ```
+
+---
 
 ## How It Works
 
-### Step 1: Transcript Download (`yt_transcripts.py`)
-Uses `yt-dlp` to download VTT subtitle files, then parses them to clean text. Handles:
-- Auto-generated and manual captions
-- Date filtering (last N days)
-- Cookie extraction from your browser (to avoid blocks)
+1. `yt-dlp` downloads auto-generated subtitles (VTT format) — no video download needed
+2. VTT timestamps are stripped → clean transcript text
+3. Transcripts are chunked into 400-char overlapping windows
+4. ChromaDB embeds each chunk with `all-MiniLM-L6-v2` (local, offline)
+5. Your query is embedded the same way → cosine similarity finds the best matches
+6. Optionally: Ollama generates a natural language answer from the matched chunks
 
-### Step 2: Index Building (`build_index.py`)
-- Chunks transcripts into logical segments
-- Embeds using `nomic-embed-text` (local, no API key)
-- Stores in ChromaDB vector database
-- Tags each chunk with metadata (creator, video, date)
+---
 
-### Step 3: Chat Interface (`chat.py`)
-- Vector search for relevant content
-- System prompt that mimics the creator's voice
-- Context injection from actual transcripts
-- Local LLM via Ollama (default: `llama3.2`) or OpenAI API
+## Example Channels to Try
 
-## Example: Stock Analyst Clone
+- `https://www.youtube.com/@NolanGouveia/videos` — investing / stock picks
+- `https://www.youtube.com/@mkbhd` — tech reviews
+- `https://www.youtube.com/@lexfridman` — AI / science interviews
+- `https://www.youtube.com/@InvestingSimplified/videos` — dividend investing
 
-```bash
-# Download a year of "Investing Simplified - Professor G"
-python yt_transcripts.py "https://www.youtube.com/@InvestingSimplified/videos" 365
-
-# Build index
-python build_index.py
-
-# Chat
-python chat.py
-
-You: "What's your current thesis on energy stocks?"
-Clone: "Based on my recent videos, I'm bullish on nuclear energy companies like..."
-```
+---
 
 ## Requirements
 
 - Python 3.10+
-- `yt-dlp` (installed via requirements.txt)
-- Optional: Ollama for local LLM, or OpenAI API key
-
-## Why This Works When Others Fail
-
-YouTube blocks most automated transcript access. This pipeline uses:
-1. `yt-dlp` with `--cookies-from-browser` to mimic real user access
-2. Local embeddings to avoid API limits
-3. No headless browser needed (faster, more reliable than Selenium)
-
-## Project Structure
-
-```
-.
-├── yt_transcripts.py      # Download and parse transcripts
-├── build_index.py         # Create vector database
-├── chat.py               # Query interface
-├── requirements.txt      # Dependencies
-├── transcripts/          # Downloaded transcripts (.txt)
-├── chroma_db/           # Vector database
-└── README.md
-```
-
-## License
-
-MIT
+- `yt-dlp` (via pipx or pip)
+- `chromadb` (optional, recommended — Python 3.12)
+- `scikit-learn` (optional fallback — Python 3.14+)
+- `ollama` (optional — for AI chat responses)

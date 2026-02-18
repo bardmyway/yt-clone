@@ -73,51 +73,86 @@ def vtt_to_text(path):
     return " ".join(lines)
 
 
-# ─── TF-IDF Vector Search (scikit-learn, works on Python 3.14+) ──────────────
+# ─── Vector Search: ChromaDB → TF-IDF → Keyword (auto-fallback) ─────────────
+
+def make_chunks(docs, size=400, step=300):
+    """Shared chunker for all search backends"""
+    chunks = []
+    for title, text in docs:
+        for i in range(0, max(1, len(text) - 100), step):
+            chunk = text[i:i + size]
+            if len(chunk.strip()) > 50:
+                chunks.append({"title": title, "text": chunk})
+    return chunks
+
+
+def build_chromadb_index(docs):
+    """Semantic embeddings via ChromaDB (Python 3.12 recommended)"""
+    try:
+        import chromadb
+        from chromadb.utils import embedding_functions
+    except ImportError:
+        return None
+    try:
+        print("\n🗄️  Building vector index (ChromaDB + all-MiniLM-L6-v2)...")
+        chunks = make_chunks(docs)
+        client = chromadb.Client()
+        ef = embedding_functions.DefaultEmbeddingFunction()
+        col = client.get_or_create_collection("yt_clone", embedding_function=ef)
+        col.add(
+            documents=[c["text"] for c in chunks],
+            ids=[f"chunk_{i}" for i in range(len(chunks))],
+            metadatas=[{"title": c["title"]} for c in chunks]
+        )
+        print(f"  ✓ Indexed {len(chunks)} chunks from {len(docs)} video(s)")
+        return ("chromadb", col)
+    except Exception as e:
+        print(f"  ⚠️  ChromaDB failed ({e}), falling back...")
+        return None
+
 
 def build_tfidf_index(docs):
-    """Chunk docs + build TF-IDF matrix. Returns (chunks, vectorizer, matrix) or None."""
+    """TF-IDF search — works on Python 3.14+, no Pydantic"""
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
     except ImportError:
         return None
-
     print("\n🗄️  Building TF-IDF index (scikit-learn)...")
-    chunks = []
-    for title, text in docs:
-        # Slide window: 400-char chunks, 100-char overlap for context continuity
-        step = 300
-        for i in range(0, max(1, len(text) - 100), step):
-            chunk = text[i:i + 400]
-            if len(chunk.strip()) > 50:
-                chunks.append({"title": title, "text": chunk})
-
+    chunks = make_chunks(docs)
     vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=20000)
     matrix = vectorizer.fit_transform([c["text"] for c in chunks])
     print(f"  ✓ Indexed {len(chunks)} chunks from {len(docs)} video(s)")
-    return chunks, vectorizer, matrix
+    return ("tfidf", chunks, vectorizer, matrix)
 
 
-def tfidf_search(index, query, top_k=3):
-    from sklearn.metrics.pairwise import cosine_similarity
-    import numpy as np
-    chunks, vectorizer, matrix = index
-    q_vec = vectorizer.transform([query])
-    scores = cosine_similarity(q_vec, matrix)[0]
-    top_idx = np.argsort(scores)[::-1]
-    seen_titles, results = set(), []
-    for i in top_idx:
-        if scores[i] < 0.01:
-            break
-        c = chunks[i]
-        # Deduplicate: only 1 chunk per video unless very different score
-        key = (c["title"], round(scores[i], 1))
-        if key not in seen_titles:
-            seen_titles.add(key)
-            results.append((c["title"], c["text"]))
-        if len(results) >= top_k:
-            break
-    return results
+def build_index(docs):
+    """Try ChromaDB → TF-IDF → None (keyword fallback)"""
+    return build_chromadb_index(docs) or build_tfidf_index(docs)
+
+
+def search_index(index, query, top_k=3):
+    if index is None:
+        return None
+    if index[0] == "chromadb":
+        col = index[1]
+        r = col.query(query_texts=[query], n_results=top_k)
+        return [(m["title"], d) for d, m in zip(r["documents"][0], r["metadatas"][0])]
+    if index[0] == "tfidf":
+        from sklearn.metrics.pairwise import cosine_similarity
+        import numpy as np
+        _, chunks, vectorizer, matrix = index
+        q_vec = vectorizer.transform([query])
+        scores = cosine_similarity(q_vec, matrix)[0]
+        seen, results = set(), []
+        for i in np.argsort(scores)[::-1]:
+            if scores[i] < 0.01: break
+            key = (chunks[i]["title"], round(scores[i], 1))
+            if key not in seen:
+                seen.add(key)
+                results.append((chunks[i]["title"], chunks[i]["text"]))
+            if len(results) >= top_k: break
+        return results
+    return None
 
 
 # ─── Ticker Extractor ────────────────────────────────────────────────────────
@@ -179,12 +214,14 @@ def main():
 
     print(f"\n✅ Loaded {len(docs)} video(s)")
 
-    # TF-IDF index (optional, needs scikit-learn)
-    tfidf = build_tfidf_index(docs)
-    if tfidf:
-        print("  ✓ TF-IDF vector search active")
+    # Build best available index: ChromaDB → TF-IDF → keyword fallback
+    index = build_index(docs)
+    if index and index[0] == "chromadb":
+        print("  ✓ Semantic vector search  (ChromaDB)")
+    elif index and index[0] == "tfidf":
+        print("  ✓ TF-IDF search  (scikit-learn)")
     else:
-        print("  ℹ️  Keyword search  (pip install scikit-learn for better search)")
+        print("  ℹ️  Keyword search  (pip install chromadb or scikit-learn for better results)")
 
     # AI (optional)
     try:
@@ -216,8 +253,8 @@ def main():
                 print()
                 continue
 
-            if tfidf:
-                results = tfidf_search(tfidf, q)
+            if index:
+                results = search_index(index, q)
             else:
                 results = keyword_search(docs, q)
 
