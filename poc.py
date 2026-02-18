@@ -108,6 +108,34 @@ def vector_search(col, query, top_k=3):
     return output
 
 
+# ─── Ticker Extractor ────────────────────────────────────────────────────────
+
+def extract_all_tickers(docs):
+    """Pull every stock ticker mentioned across all videos"""
+    # Match $TICKER or standalone ALL-CAPS 2-5 letter words (skip common words)
+    skip = {"I", "A", "THE", "AND", "FOR", "BUT", "ARE", "NOT", "ALL", "YOU",
+            "IT", "IN", "ON", "AT", "OR", "TO", "IS", "OF", "MY", "SO", "IF",
+            "BE", "DO", "GO", "UP", "NOW", "NEW", "BIG", "GET", "HAS", "CAN",
+            "MAY", "CEO", "ETF", "IPO", "GDP", "CPI", "FED", "SEC", "AI", "US",
+            "SP", "QQQ", "SPY", "DCA", "IRA", "UK", "EU", "II", "III", "IV"}
+    tickers = {}
+    for title, text in docs:
+        found = re.findall(r'\$([A-Z]{1,5})\b|\b([A-Z]{2,5})\b', text)
+        for match in found:
+            t = match[0] or match[1]
+            if t in skip: continue
+            if t not in tickers:
+                tickers[t] = {"count": 0, "videos": set()}
+            tickers[t]["count"] += 1
+            tickers[t]["videos"].add(title[:50])
+
+    # Return sorted by frequency, filter noise (mentioned 2+ times)
+    return sorted(
+        [(t, d["count"], list(d["videos"])) for t, d in tickers.items() if d["count"] >= 2],
+        key=lambda x: -x[1]
+    )
+
+
 # ─── Fallback Keyword Search ─────────────────────────────────────────────────
 
 def keyword_search(docs, query, top_k=3):
@@ -155,13 +183,25 @@ def main():
         use_ai = False
         print("  ℹ️  No AI responses  (install Ollama for chat mode)")
 
-    print("\nAsk anything about this creator's content. Ctrl+C to quit.")
+    print("\nAsk anything. Special commands: 'tickers' = show all stocks mentioned.")
     print("─" * 60)
 
     while True:
         try:
             q = input("\nYou: ").strip()
             if not q:
+                continue
+
+            # Special command: extract all tickers
+            if q.lower() in ("tickers", "stocks", "what stocks", "show tickers"):
+                results = extract_all_tickers(docs)
+                if not results:
+                    print("No tickers found.")
+                else:
+                    print(f"\n📈 {len(results)} tickers mentioned:\n")
+                    for ticker, count, videos in results[:30]:
+                        print(f"  ${ticker:<6} ×{count:<3}  {videos[0][:55]}")
+                print()
                 continue
 
             if collection:
