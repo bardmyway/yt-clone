@@ -13,7 +13,7 @@ Usage:
 No OpenAI. No API keys. Works 100% offline.
 """
 
-import subprocess, sys, os, re
+import subprocess, sys, os, re, requests
 from datetime import datetime, timedelta
 
 
@@ -224,13 +224,83 @@ def main():
         print("  ℹ️  Keyword search  (pip install chromadb or scikit-learn for better results)")
 
     # AI (optional)
+    ai_backends = []
+    
+    # OpenRouter GLM-4.5-Air (free)
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_key:
+        ai_backends.append("openrouter")
+        print("  ✓ OpenRouter AI active  (GLM-4.5-Air free)")
+    else:
+        print("  ℹ️  No OpenRouter API key  (set OPENROUTER_API_KEY env var)")
+    
+    # Ollama (local)
     try:
         import ollama
-        use_ai = True
+        ai_backends.append("ollama")
         print("  ✓ Ollama AI active  (llama3.2)")
     except ImportError:
-        use_ai = False
-        print("  ℹ️  No AI responses  (install Ollama for chat mode)")
+        pass
+    
+    if not ai_backends:
+        print("  ℹ️  No AI responses  (install Ollama or set OPENROUTER_API_KEY)")
+
+    def ask_ai(backends, context, question):
+        """Try each AI backend until one works."""
+        # OpenRouter
+        if "openrouter" in backends:
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+            if openrouter_key:
+                try:
+                    import json
+                    headers = {
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json"
+                    }
+                    data = {
+                        "model": "z-ai/glm-4.5-air:free",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"You are answering as a YouTube creator based ONLY on their transcripts.\n"
+                                    f"Question: {question}\n\nTranscripts:\n{context}\n\n"
+                                    f"Answer concisely, cite which video the info came from."
+                                )
+                            }
+                        ],
+                        "max_tokens": 1000,
+                        "extra_body": {"thinking": {"type": "disabled"}}
+                    }
+                    response = requests.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers,
+                        json=data,
+                        timeout=30
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                    return result["choices"][0]["message"]["content"]
+                except Exception as e:
+                    print(f"  ⚠️  OpenRouter failed: {e}")
+        
+        # Ollama
+        if "ollama" in backends:
+            try:
+                import ollama
+                r = ollama.chat("llama3.2", messages=[{
+                    "role": "user",
+                    "content": (
+                        f"You are answering as a YouTube creator based ONLY on their transcripts.\n"
+                        f"Question: {question}\n\nTranscripts:\n{context}\n\n"
+                        f"Answer concisely, cite which video the info came from."
+                    )
+                }])
+                return r['message']['content']
+            except Exception as e:
+                print(f"  ⚠️  Ollama failed: {e}")
+        
+        return None
 
     print("\nAsk anything. Special commands: 'tickers' = show all stocks mentioned.")
     print("─" * 60)
@@ -264,16 +334,16 @@ def main():
 
             context = "\n---\n".join(f"[{t}]\n{e}" for t, e in results)
 
-            if use_ai:
-                r = ollama.chat("llama3.2", messages=[{
-                    "role": "user",
-                    "content": (
-                        f"You are answering as a YouTube creator based ONLY on their transcripts.\n"
-                        f"Question: {q}\n\nTranscripts:\n{context}\n\n"
-                        f"Answer concisely, cite which video the info came from."
-                    )
-                }])
-                print(f"\n🎙️  {r['message']['content']}")
+            if ai_backends:
+                answer = ask_ai(ai_backends, context, q)
+                if answer:
+                    print(f"\n🎙️  {answer}")
+                else:
+                    # AI failed, fall back to showing raw results
+                    print(f"\nTop {len(results)} result(s):\n")
+                    for i, (title, excerpt) in enumerate(results, 1):
+                        print(f"[{i}] {title}")
+                        print(f"    {excerpt}\n")
             else:
                 print(f"\nTop {len(results)} result(s):\n")
                 for i, (title, excerpt) in enumerate(results, 1):
