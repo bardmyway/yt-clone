@@ -97,12 +97,21 @@ python3 poc.py "https://youtu.be/VIDEO_ID" 7
 
 ## Add AI Responses (Optional)
 
+### Option 1: OpenRouter (Free, Cloud)
+Get a free API key from [OpenRouter](https://openrouter.ai/settings/keys), then:
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+python3 poc.py "https://www.youtube.com/..." 30
+```
+The script will automatically use **GLM-4.5-Air (free)** for high‑quality answers — no local setup.
+
+### Option 2: Ollama (Local)
 Install [Ollama](https://ollama.ai), then:
 ```bash
 ollama pull llama3.2
 pip install ollama
 ```
-Re-run `poc.py` — it auto-detects Ollama and switches to full chat mode where the AI answers in the creator's voice.
+Re‑run `poc.py` — it auto‑detects Ollama and switches to full chat mode where the AI answers in the creator's voice.
 
 ---
 
